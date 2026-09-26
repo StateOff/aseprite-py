@@ -551,11 +551,81 @@ def test_flatten_indexed_out_of_range_is_transparent() -> None:
     assert sprite.flatten(0) == b"\x00\x00\x00\x00"
 
 
-def test_flatten_non_normal_blend_uses_normal() -> None:
+def _two_pixel_layers(mode: BlendMode, below: bytes, above: bytes) -> Sprite:
     sprite = Sprite(1, 1, ColorMode.RGBA, empty=True)
     bottom = sprite.add_layer("b")
-    top = sprite.add_layer("t", blend_mode=BlendMode.MULTIPLY)
+    top = sprite.add_layer("t", blend_mode=mode)
     frame = sprite.add_frame(100)
-    frame.set_cel(bottom, Pixels(1, 1, b"\x00\x00\xff\xff", ColorMode.RGBA))
-    frame.set_cel(top, Pixels(1, 1, b"\xff\x00\x00\xff", ColorMode.RGBA))
-    assert sprite.flatten(0) == b"\xff\x00\x00\xff"
+    frame.set_cel(bottom, Pixels(1, 1, below, ColorMode.RGBA))
+    frame.set_cel(top, Pixels(1, 1, above, ColorMode.RGBA))
+    return sprite
+
+
+def test_flatten_applies_the_layer_blend_mode() -> None:
+    # blue under red: multiply gives black, screen magenta, difference too
+    blue, red = b"\x00\x00\xff\xff", b"\xff\x00\x00\xff"
+    assert (
+        _two_pixel_layers(BlendMode.MULTIPLY, blue, red).flatten(0)
+        == b"\x00\x00\x00\xff"
+    )
+    assert (
+        _two_pixel_layers(BlendMode.SCREEN, blue, red).flatten(0) == b"\xff\x00\xff\xff"
+    )
+    assert (
+        _two_pixel_layers(BlendMode.DIFFERENCE, blue, red).flatten(0)
+        == b"\xff\x00\xff\xff"
+    )
+    assert (
+        _two_pixel_layers(BlendMode.DARKEN, blue, red).flatten(0) == b"\x00\x00\x00\xff"
+    )
+    assert _two_pixel_layers(BlendMode.NORMAL, blue, red).flatten(0) == red
+
+
+def test_blenders_match_aseprite_arithmetic() -> None:
+    from aseprite._render import get_blender
+
+    dst, src = bytes((200, 100, 50, 255)), bytes((100, 150, 250, 255))
+    # opaque: the mode's own color (pixman MUL_UN8 / DIV_UN8 rounding)
+    assert get_blender(BlendMode.MULTIPLY)(dst, src, 255) == bytes((78, 59, 49, 255))
+    assert get_blender(BlendMode.SCREEN)(dst, src, 255) == bytes((222, 191, 251, 255))
+    assert get_blender(BlendMode.ADDITION)(dst, src, 255) == bytes((255, 250, 255, 255))
+    assert get_blender(BlendMode.SUBTRACT)(dst, src, 255) == bytes((100, 0, 0, 255))
+    assert get_blender(BlendMode.COLOR_DODGE)(dst, src, 255) == bytes(
+        (255, 243, 255, 255)
+    )
+    # unknown modes blend as Normal
+    assert get_blender(BlendMode(99))(dst, src, 255) == src
+
+
+def test_new_blend_fades_the_mode_over_a_transparent_backdrop() -> None:
+    from aseprite._render import get_blender
+
+    dst, src = bytes((200, 100, 50, 60)), bytes((100, 150, 250, 255))
+    classic = get_blender(BlendMode.MULTIPLY, new_blend=False)(dst, src, 255)
+    new = get_blender(BlendMode.MULTIPLY, new_blend=True)(dst, src, 255)
+    normal = get_blender(BlendMode.NORMAL)(dst, src, 255)
+    assert classic != new
+    # over a nearly clear backdrop the new blend is close to Normal
+    assert all(
+        abs(a - b) <= abs(c - b) for a, b, c in zip(new, normal, classic, strict=True)
+    )
+
+
+def test_grayscale_blenders_follow_aseprite() -> None:
+    from aseprite._render import _blend_normal, get_blender
+
+    # no grayscale HSL blenders: they blend as Normal
+    assert get_blender(BlendMode.HUE, grayscale=True) is _blend_normal
+    # Aseprite's grayscale Addition with new blending is its Exclusion blender
+    assert get_blender(BlendMode.ADDITION, True, grayscale=True) is get_blender(
+        BlendMode.EXCLUSION, True
+    )
+
+
+def test_mask_color_source_keeps_the_backdrop() -> None:
+    # a fully clear black source pixel is Aseprite's mask color: skipped, so
+    # a clear backdrop keeps its color bytes
+    sprite = _two_pixel_layers(
+        BlendMode.DIFFERENCE, b"\x2d\x2d\x2d\x00", b"\x00\x00\x00\x00"
+    )
+    assert sprite.flatten(0) == b"\x2d\x2d\x2d\x00"

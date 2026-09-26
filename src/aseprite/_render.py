@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -188,7 +189,14 @@ def _composite_group(
     _composite_layers(
         sprite, frame_index, children, child_buf, isolate_groups, scratches, depth + 1
     )
-    _blend_buffer(dest, child_buf, _layer_opacity(sprite, group), group.blend_mode)
+    _blend_buffer(
+        dest,
+        child_buf,
+        _layer_opacity(sprite, group),
+        group.blend_mode,
+        sprite.new_blend,
+        sprite.color_mode is ColorMode.GRAYSCALE,
+    )
 
 
 def _layer_opacity(sprite: Sprite, layer: Layer) -> int:
@@ -323,6 +331,10 @@ def _blit_cel(sprite: Sprite, layer: Layer, cel: Cel, dest: bytearray) -> None:
     if pixels is None:
         return
     opacity = _mul_un8(_layer_opacity(sprite, layer), cel.opacity)
+    # an image / tilemap layer's blend mode always applies (file spec NOTE.6)
+    blender = get_blender(
+        layer.blend_mode, sprite.new_blend, sprite.color_mode is ColorMode.GRAYSCALE
+    )
     # Only visit the part of the cel that lands on the canvas, so the cost
     # is bounded by the canvas size rather than the cel size.
     x0 = max(0, -cel.x)
@@ -334,8 +346,10 @@ def _blit_cel(sprite: Sprite, layer: Layer, cel: Cel, dest: bytearray) -> None:
         for px in range(x0, x1):
             dx = cel.x + px
             src = _pixel_rgba(sprite, layer, pixels, px, py)
+            if src == _MASK:
+                continue  # Aseprite's BlenderHelper leaves the backdrop as is
             di = (dy * sprite.width + dx) * 4
-            dest[di : di + 4] = _blend_normal(bytes(dest[di : di + 4]), src, opacity)
+            dest[di : di + 4] = blender(bytes(dest[di : di + 4]), src, opacity)
 
 
 def _pixel_rgba(sprite: Sprite, layer: Layer, pixels: Pixels, x: int, y: int) -> bytes:
@@ -355,14 +369,29 @@ def _pixel_rgba(sprite: Sprite, layer: Layer, pixels: Pixels, x: int, y: int) ->
 
 
 def _blend_buffer(
-    dest: bytearray, src: bytearray, opacity: int, blend_mode: BlendMode
+    dest: bytearray,
+    src: bytearray,
+    opacity: int,
+    blend_mode: BlendMode,
+    new_blend: bool = True,
+    grayscale: bool = False,
 ) -> None:
-    if blend_mode is not BlendMode.NORMAL:
-        blend_mode = BlendMode.NORMAL
+    """Composites an isolated group's buffer ``src`` onto ``dest``.
+
+    A group's blend mode and opacity are valid when the header's group
+    blend flag is set (file spec NOTE.6) - the only case groups are
+    isolated.
+    """
+    blender = get_blender(blend_mode, new_blend, grayscale)
     for i in range(0, len(dest), 4):
-        dest[i : i + 4] = _blend_normal(
-            bytes(dest[i : i + 4]), bytes(src[i : i + 4]), opacity
-        )
+        pixel = bytes(src[i : i + 4])
+        if pixel != _MASK:
+            dest[i : i + 4] = blender(bytes(dest[i : i + 4]), pixel, opacity)
+
+
+#: the mask color of RGBA and grayscale images: a source pixel equal to it
+#: is skipped - the backdrop keeps its bytes (Aseprite's ``BlenderHelper``)
+_MASK = b"\x00\x00\x00\x00"
 
 
 def _mul_un8(a: int, b: int) -> int:
@@ -392,3 +421,265 @@ def _blend_normal(dst: bytes, src: bytes, opacity: int) -> bytes:
         out[c] = dst[c] + step
     out[3] = out_a
     return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# Blend modes - ported from Aseprite's ``src/doc/blend_funcs.cpp`` so the
+# composited bytes match its own export: the same 8-bit integer arithmetic
+# (pixman's ``MUL_UN8`` / ``DIV_UN8``), the same floating point for soft
+# light and the HSL modes, and the same final composite through
+# ``rgba_blender_normal``.
+# ---------------------------------------------------------------------------
+
+
+def _div_un8(a: int, b: int) -> int:
+    """Returns ``a * 255 / b`` rounded the way pixman's ``DIV_UN8`` does."""
+    return (a * 0xFF + b // 2) // b
+
+
+def _multiply(b: int, s: int) -> int:
+    return _mul_un8(b, s)
+
+
+def _screen(b: int, s: int) -> int:
+    return b + s - _mul_un8(b, s)
+
+
+def _hard_light(b: int, s: int) -> int:
+    return _multiply(b, s << 1) if s < 128 else _screen(b, (s << 1) - 255)
+
+
+def _overlay(b: int, s: int) -> int:
+    return _hard_light(s, b)
+
+
+def _darken(b: int, s: int) -> int:
+    return min(b, s)
+
+
+def _lighten(b: int, s: int) -> int:
+    return max(b, s)
+
+
+def _color_dodge(b: int, s: int) -> int:
+    if b == 0:
+        return 0
+    s = 255 - s
+    return 255 if b >= s else _div_un8(b, s)
+
+
+def _color_burn(b: int, s: int) -> int:
+    if b == 255:
+        return 255
+    b = 255 - b
+    return 0 if b >= s else 255 - _div_un8(b, s)
+
+
+def _soft_light(b8: int, s8: int) -> int:
+    b = b8 / 255.0
+    s = s8 / 255.0
+    d = ((16 * b - 12) * b + 4) * b if b <= 0.25 else b**0.5
+    if s <= 0.5:
+        r = b - (1.0 - 2.0 * s) * b * (1.0 - b)
+    else:
+        r = b + (2.0 * s - 1.0) * (d - b)
+    return int(r * 255 + 0.5)
+
+
+def _difference(b: int, s: int) -> int:
+    return abs(b - s)
+
+
+def _exclusion(b: int, s: int) -> int:
+    return b + s - 2 * _mul_un8(b, s)
+
+
+def _addition(b: int, s: int) -> int:
+    return min(b + s, 255)
+
+
+def _subtract(b: int, s: int) -> int:
+    return max(b - s, 0)
+
+
+def _divide(b: int, s: int) -> int:
+    if b == 0:
+        return 0
+    return 255 if b >= s else _div_un8(b, s)
+
+
+_SEPARABLE = {
+    BlendMode.MULTIPLY: _multiply,
+    BlendMode.SCREEN: _screen,
+    BlendMode.OVERLAY: _overlay,
+    BlendMode.DARKEN: _darken,
+    BlendMode.LIGHTEN: _lighten,
+    BlendMode.COLOR_DODGE: _color_dodge,
+    BlendMode.COLOR_BURN: _color_burn,
+    BlendMode.HARD_LIGHT: _hard_light,
+    BlendMode.SOFT_LIGHT: _soft_light,
+    BlendMode.DIFFERENCE: _difference,
+    BlendMode.EXCLUSION: _exclusion,
+    BlendMode.ADDITION: _addition,
+    BlendMode.SUBTRACT: _subtract,
+    BlendMode.DIVIDE: _divide,
+}
+
+
+def _lum(r: float, g: float, b: float) -> float:
+    return 0.3 * r + 0.59 * g + 0.11 * b
+
+
+def _sat(r: float, g: float, b: float) -> float:
+    return max(r, g, b) - min(r, g, b)
+
+
+def _clip_color(r: float, g: float, b: float) -> tuple[float, float, float]:
+    lum = _lum(r, g, b)
+    n = min(r, g, b)
+    x = max(r, g, b)
+    if n < 0:
+        r = lum + (((r - lum) * lum) / (lum - n))
+        g = lum + (((g - lum) * lum) / (lum - n))
+        b = lum + (((b - lum) * lum) / (lum - n))
+    if x > 1:
+        r = lum + (((r - lum) * (1 - lum)) / (x - lum))
+        g = lum + (((g - lum) * (1 - lum)) / (x - lum))
+        b = lum + (((b - lum) * (1 - lum)) / (x - lum))
+    return r, g, b
+
+
+def _set_lum(r: float, g: float, b: float, lum: float) -> tuple[float, float, float]:
+    d = lum - _lum(r, g, b)
+    return _clip_color(r + d, g + d, b + d)
+
+
+def _set_sat(r: float, g: float, b: float, sat: float) -> tuple[float, float, float]:
+    lo = min(r, g, b)
+    span = max(r, g, b) - lo
+    if span > 0.0:
+        return ((r - lo) * sat) / span, ((g - lo) * sat) / span, ((b - lo) * sat) / span
+    return 0.0, 0.0, 0.0
+
+
+def _unit(c: bytes) -> tuple[float, float, float]:
+    return c[0] / 255.0, c[1] / 255.0, c[2] / 255.0
+
+
+def _hsl_hue(dst: bytes, src: bytes) -> tuple[float, float, float]:
+    br, bg, bb = _unit(dst)
+    r, g, b = _set_sat(*_unit(src), _sat(br, bg, bb))
+    return _set_lum(r, g, b, _lum(br, bg, bb))
+
+
+def _hsl_saturation(dst: bytes, src: bytes) -> tuple[float, float, float]:
+    br, bg, bb = _unit(dst)
+    r, g, b = _set_sat(br, bg, bb, _sat(*_unit(src)))
+    return _set_lum(r, g, b, _lum(br, bg, bb))
+
+
+def _hsl_color(dst: bytes, src: bytes) -> tuple[float, float, float]:
+    return _set_lum(*_unit(src), _lum(*_unit(dst)))
+
+
+def _hsl_luminosity(dst: bytes, src: bytes) -> tuple[float, float, float]:
+    return _set_lum(*_unit(dst), _lum(*_unit(src)))
+
+
+_NON_SEPARABLE = {
+    BlendMode.HUE: _hsl_hue,
+    BlendMode.SATURATION: _hsl_saturation,
+    BlendMode.COLOR: _hsl_color,
+    BlendMode.LUMINOSITY: _hsl_luminosity,
+}
+
+
+def _channel(value: float) -> int:
+    """A C ``int`` cast of ``255 * value`` (truncation), kept in a byte."""
+    return min(255, max(0, int(255.0 * value)))
+
+
+def _blend_merge(dst: bytes, src: bytes, opacity: int) -> bytes:
+    """Aseprite's ``rgba_blender_merge``: ``dst`` moved toward ``src``."""
+    if dst[3] == 0:
+        rgb = src[:3]
+    elif src[3] == 0:
+        rgb = dst[:3]
+    else:
+        rgb = bytes(dst[c] + _mul_un8(src[c] - dst[c], opacity) for c in range(3))
+    alpha = dst[3] + _mul_un8(src[3] - dst[3], opacity)
+    if alpha == 0:
+        rgb = b"\x00\x00\x00"
+    return bytes((*rgb, alpha))
+
+
+def _classic(mode: BlendMode) -> Callable[[bytes, bytes, int], bytes]:
+    """The mode's color, then composited as Normal - Aseprite's
+    ``rgba_blender_<mode>``."""
+    separable = _SEPARABLE.get(mode)
+    if separable is not None:
+
+        def blend(dst: bytes, src: bytes, opacity: int) -> bytes:
+            color = bytes(separable(dst[c], src[c]) for c in range(3))
+            return _blend_normal(dst, color + src[3:4], opacity)
+
+        return blend
+    hsl = _NON_SEPARABLE[mode]
+
+    def blend_hsl(dst: bytes, src: bytes, opacity: int) -> bytes:
+        color = bytes(_channel(v) for v in hsl(dst, src))
+        return _blend_normal(dst, color + src[3:4], opacity)
+
+    return blend_hsl
+
+
+def _new_blend(
+    classic: Callable[[bytes, bytes, int], bytes],
+) -> Callable[[bytes, bytes, int], bytes]:
+    """Aseprite's ``RGBA_BLENDER_N``: the mode's result, faded toward Normal
+    by how transparent the backdrop is."""
+
+    def blend(dst: bytes, src: bytes, opacity: int) -> bytes:
+        if dst[3] == 0:
+            return _blend_normal(dst, src, opacity)
+        normal = _blend_normal(dst, src, opacity)
+        mode = classic(dst, src, opacity)
+        merged = _blend_merge(normal, mode, dst[3])
+        composite = _mul_un8(dst[3], _mul_un8(src[3], opacity))
+        return _blend_merge(merged, mode, composite)
+
+    return blend
+
+
+_BLENDERS: dict[tuple[BlendMode, bool], Callable[[bytes, bytes, int], bytes]] = {}
+
+
+def get_blender(
+    mode: BlendMode, new_blend: bool = True, grayscale: bool = False
+) -> Callable[[bytes, bytes, int], bytes]:
+    """Returns the pixel blender for ``mode``: ``(dst, src, opacity) -> RGBA``.
+
+    ``new_blend`` picks Aseprite's "new blending" variant of the non-Normal
+    modes (its default since 1.3), which fades a mode toward Normal over a
+    semi-transparent backdrop. Unknown modes blend as Normal.
+
+    ``grayscale`` follows Aseprite's grayscale blenders (``get_graya_blender``):
+    the HSL modes blend as Normal, and Addition with new blending uses the
+    Exclusion blender - as the editor does, so exports agree.
+    """
+    if grayscale:
+        if mode in _NON_SEPARABLE:
+            return _blend_normal
+        if mode is BlendMode.ADDITION and new_blend:
+            mode = BlendMode.EXCLUSION
+    if mode is BlendMode.NORMAL or (
+        mode not in _SEPARABLE and mode not in _NON_SEPARABLE
+    ):
+        return _blend_normal
+    key = (mode, new_blend)
+    blender = _BLENDERS.get(key)
+    if blender is None:
+        classic = _classic(mode)
+        blender = _new_blend(classic) if new_blend else classic
+        _BLENDERS[key] = blender
+    return blender

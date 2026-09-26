@@ -67,6 +67,10 @@ class Sprite:
         group_blend: Set true to composite each group separately and apply
             its opacity. This follows the file header flag; Aseprite 1.3
             ignores that flag during rendering.
+        new_blend: Use Aseprite's "new blending" for the non-Normal blend
+            modes - the mode fades toward Normal over a semi-transparent
+            backdrop. True by default, as in Aseprite 1.3; it is an editor
+            preference, not stored in the file.
         valid_layer_opacity: Whether stored layer opacity values apply.
             False treats layers as fully opaque when compositing.
         transparent_index: The empty pixel index in indexed mode. It is
@@ -96,6 +100,7 @@ class Sprite:
         self.color_mode = color_mode
         self.valid_layer_opacity = True
         self.group_blend = False
+        self.new_blend = True
         self.deprecated_speed = 0
         self.transparent_index = 0
         self.num_colors = 256
@@ -417,8 +422,9 @@ class Sprite:
         Linked cels are resolved.
         Group isolation follows ``group_blend``.
         Cels are ordered by layer index plus z-index, then z-index to break
-        ties. Only Normal blending is implemented; other blend modes are
-        rendered as Normal. Use Aseprite to export those blend modes.
+        ties. Layers blend with their blend mode, ported from Aseprite so
+        the bytes match its export - including its "new blending" of the
+        non-Normal modes when ``new_blend`` is set (the default).
 
         Indexed compositing follows ``ColorMode.INDEXED`` semantics.
         Canvases are limited to 67,108,864 pixels (the area of 8192 by 8192).

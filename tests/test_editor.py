@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from aseprite import Color, ColorMode, LayerType, Palette, Pixels, Sprite
+from aseprite import BlendMode, Color, ColorMode, LayerType, Palette, Pixels, Sprite
 from tests.helpers import (
     aseprite_cli,
     blend_sprite,
@@ -221,3 +221,52 @@ def test_background_layer_opacity_matches_cli(tmp_path: Path) -> None:
     sprite.layers[0].opacity = 0
     sprite.frames[0][0] = Pixels(1, 1, b"\xff\x00\x00\xff", ColorMode.RGBA)
     _assert_flatten_matches_cli(sprite, tmp_path)
+
+
+def _random_blend_sprite(mode: BlendMode, color_mode: ColorMode, seed: int) -> Sprite:
+    """A random backdrop - clear, translucent and opaque pixels - under a
+    random layer with ``mode``, layer and cel opacity below full."""
+    import random
+
+    rng = random.Random(seed)  # noqa: S311 - test pixels
+    sprite = Sprite(12, 12, color_mode)
+
+    def pixel(alphas: list[int]) -> tuple[int, ...]:
+        a = rng.choice(alphas)
+        if color_mode is ColorMode.GRAYSCALE:
+            return (rng.randrange(256), a)
+        return (rng.randrange(256), rng.randrange(256), rng.randrange(256), a)
+
+    base = sprite.blank_pixels()
+    for y in range(12):
+        for x in range(12):
+            base[x, y] = pixel([0, 0, 40, 128, 200, 255, 255])
+    sprite.frames[0][sprite.layers[0]] = base
+    top = sprite.add_layer("top", opacity=180, blend_mode=mode)
+    over = sprite.blank_pixels()
+    for y in range(12):
+        for x in range(12):
+            over[x, y] = pixel([0, 30, 128, 255, 255])
+    sprite.frames[0].set_cel(top, over, opacity=230)
+    return sprite
+
+
+_BLEND_MODES = [
+    m
+    for m in BlendMode
+    if m is not BlendMode.NORMAL and not m.name.startswith("UNKNOWN")
+]
+
+
+@needs_cli
+@pytest.mark.parametrize("mode", _BLEND_MODES, ids=lambda m: m.name)
+def test_blend_mode_matches_cli(tmp_path: Path, mode: BlendMode) -> None:
+    _assert_flatten_matches_cli(_random_blend_sprite(mode, ColorMode.RGBA, 7), tmp_path)
+
+
+@needs_cli
+@pytest.mark.parametrize("mode", _BLEND_MODES, ids=lambda m: m.name)
+def test_grayscale_blend_mode_matches_cli(tmp_path: Path, mode: BlendMode) -> None:
+    _assert_flatten_matches_cli(
+        _random_blend_sprite(mode, ColorMode.GRAYSCALE, 11), tmp_path
+    )

@@ -50,8 +50,8 @@ class BlendMode(_OpenIntEnum):
     """A layer blend mode from the Aseprite spec.
 
     Unrecognized values are preserved as ``UNKNOWN_<n>`` members on read
-    and write. ``Sprite.flatten`` renders all modes as Normal; use Aseprite
-    to export other modes.
+    and write. ``Sprite.flatten`` renders every mode with Aseprite's own
+    arithmetic; an unrecognized one renders as Normal.
     """
 
     NORMAL = 0

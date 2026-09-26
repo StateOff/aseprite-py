@@ -13,7 +13,8 @@ It works directly with files and does not require the Aseprite application.
 - Layers, groups, tilemaps, tilesets, and linked cels
 - Animation tags, palettes, and slices with nine-patch centers and pivots
 - Color profiles, external file references, and typed user data
-- Frame rendering with Normal blending and optional PNG export
+- Frame rendering with every layer blend mode, matching Aseprite's own
+  export, and optional PNG export
 
 ## Installation
 
@@ -49,7 +50,10 @@ sprite.image(frame=0).save("hero.png")
 ```
 
 `image()` returns a Pillow image. Use `flatten()` for raw RGBA bytes.
-Rendering supports Normal blending; use Aseprite to export other blend modes.
+Rendering supports every layer blend mode with Aseprite's own arithmetic, so
+flattened pixels match its export. `sprite.new_blend` (default `True`, as in
+Aseprite 1.3) selects its "new blending" for the non-Normal modes; set it to
+`False` for the classic formulas.
 
 `Sprite.from_bytes(data)` reads from memory. `open()` and `save()` also accept
 binary file objects:
