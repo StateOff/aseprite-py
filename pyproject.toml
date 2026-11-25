@@ -31,6 +31,9 @@ Issues = "https://github.com/mattt/aseprite-py/issues"
 image = [
     "pillow>=10.1",
 ]
+fast = [
+    "numpy>=1.24",
+]
 
 [build-system]
 requires = ["uv_build>=0.10.0,<0.11.0"]

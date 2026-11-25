@@ -36,6 +36,14 @@ Include the Pillow extra for image export:
 uv add "aseprite[image]"
 ```
 
+Include the fast extra to composite frames with NumPy - the same bytes,
+many times faster (pure Python is used without it, or with
+`ASEPRITE_PURE_PYTHON=1`):
+
+```sh
+uv add "aseprite[fast]"
+```
+
 ## Open and export a sprite
 
 ```python

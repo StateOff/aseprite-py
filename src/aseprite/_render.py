@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import struct
 from collections.abc import Callable
 from dataclasses import replace
@@ -25,6 +26,25 @@ from aseprite._model import (
 
 if TYPE_CHECKING:
     from aseprite._sprite import Sprite
+
+
+_NUMPY: object = None
+
+
+def _numpy():
+    """:mod:`aseprite._render_np` - the same compositing over arrays - when
+    NumPy is installed and ``ASEPRITE_PURE_PYTHON`` isn't set; else None."""
+    global _NUMPY
+    if _NUMPY is None:
+        _NUMPY = False
+        if not os.environ.get("ASEPRITE_PURE_PYTHON"):
+            try:
+                from aseprite import _render_np
+
+                _NUMPY = _render_np
+            except ImportError:
+                pass
+    return _NUMPY or None
 
 
 def flatten_frame(sprite: Sprite, frame_index: int) -> bytes:
@@ -63,6 +83,10 @@ def _flatten_indexed(sprite: Sprite, frame_index: int, layers: list[Layer]) -> b
         if pixels is None or pixels.color_mode is not ColorMode.INDEXED:
             continue
         skip = None if layer.background else sprite.transparent_index
+        np_render = _numpy()
+        if np_render is not None:
+            np_render.paint_indexed(indices, painted, width, height, pixels, cel, skip)
+            continue
         x0 = max(0, -cel.x)
         y0 = max(0, -cel.y)
         x1 = min(pixels.width, width - cel.x)
@@ -82,6 +106,9 @@ def _flatten_indexed(sprite: Sprite, frame_index: int, layers: list[Layer]) -> b
 
 def _apply_palette(colors: Palette, indices: bytearray, painted: bytearray) -> bytes:
     """Maps palette indices to RGBA bytes without a per-pixel Python loop."""
+    np_render = _numpy()
+    if np_render is not None:
+        return np_render.apply_palette(colors, indices, painted)
     palette = colors.colors
     tables = []
     for channel in range(4):
@@ -327,6 +354,10 @@ def _flip_tile(
 
 
 def _blit_cel(sprite: Sprite, layer: Layer, cel: Cel, dest: bytearray) -> None:
+    np_render = _numpy()
+    if np_render is not None:
+        np_render.blit_cel(sprite, layer, cel, dest)
+        return
     pixels = _cel_pixels(sprite, layer, cel)
     if pixels is None:
         return
@@ -382,6 +413,10 @@ def _blend_buffer(
     blend flag is set (file spec NOTE.6) - the only case groups are
     isolated.
     """
+    np_render = _numpy()
+    if np_render is not None:
+        np_render.blend_buffer(dest, src, opacity, blend_mode, new_blend, grayscale)
+        return
     blender = get_blender(blend_mode, new_blend, grayscale)
     for i in range(0, len(dest), 4):
         pixel = bytes(src[i : i + 4])
